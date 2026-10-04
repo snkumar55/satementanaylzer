@@ -31,7 +31,7 @@ def statement_records(engine):
     if frame.empty:
         return frame
     frame["DateObj"] = pd.to_datetime(frame["DateObj"], errors="coerce")
-    return frame
+    return annotate_transfer_types(frame)
 
 
 def filter_question_period(engine, frame, question):
@@ -93,6 +93,9 @@ def question_filters(engine, frame, question):
         direction = "Withdrawal"
     if direction:
         selected = selected[selected[direction] > 0]
+        if direction == "Withdrawal":
+            asks_for_own_transfer = bool(re.search(r"\b(own|self)\s+accounts?\b|\btransfer(?:s)?\s+to\s+myself\b", lowered))
+            selected = selected[selected["SelfTransfer"]] if asks_for_own_transfer else selected[~selected["SelfTransfer"]]
 
     categories = sorted(frame["Category"].dropna().astype(str).unique())
     category = next(
@@ -187,6 +190,17 @@ def answer_statement_question(engine, question):
 
     if matches.empty:
         return f"No matching transactions were found for {period_label}. Try broadening the date range or removing a filter."
+
+    def matching_returned_amount():
+        period_rows, _ = filter_question_period(engine, frame, question)
+        returned_rows = period_rows[period_rows["ReturnedPayment"]]
+        if entity:
+            returned_rows = engine._chat_match_records(returned_rows, entity)
+        if category:
+            returned_rows = returned_rows[returned_rows["Category"].str.casefold() == category.casefold()]
+        if mode:
+            returned_rows = returned_rows[returned_rows["PaymentMode"].str.casefold() == mode.casefold()]
+        return float(returned_rows["Deposit"].sum())
 
     if re.search(r"\b(recurring|repeated|repeat)\b", lowered):
         payments = matches[matches["Withdrawal"] > 0]
@@ -331,8 +345,21 @@ def answer_statement_question(engine, question):
 
     if entity or category or mode or direction:
         if direction:
-            total = matches[direction].sum()
-            label = "credited" if direction == "Deposit" else "withdrawn"
+            total = float(matches[direction].sum())
+            if direction == "Withdrawal" and re.search(r"\b(own|self)\s+accounts?\b|\btransfer(?:s)?\s+to\s+myself\b", lowered):
+                return (
+                    f"Own-account transfers totaled {format_currency(total)} across {len(matches)} transactions "
+                    f"in {period_label}. They are shown separately and excluded from spending."
+                )
+            label = "credited" if direction == "Deposit" else "withdrawn (excluding own-account transfers)"
+            if direction == "Withdrawal":
+                returned_amount = matching_returned_amount()
+                net_amount = total - returned_amount
+                return (
+                    f"External withdrawals in {period_label}: {format_currency(total)} across {len(matches)} transactions."
+                    f"\nIdentified returns: {format_currency(returned_amount)}"
+                    f"\nNet spending after returns: {format_currency(net_amount)}"
+                )
         else:
             total = matches["Deposit"].sum() + matches["Withdrawal"].sum()
             label = "moved"
@@ -396,44 +423,51 @@ def load_statement(engine, uploaded_file):
 
 
 def render_overview(engine):
-    records = pd.DataFrame(engine.raw_transactions)
+    records = annotate_transfer_types(pd.DataFrame(engine.raw_transactions))
+    external_spend = float(records.loc[~records["SelfTransfer"], "Withdrawal"].sum())
+    returned = float(records["ReturnedAmount"].sum())
+    self_transfers = float(records["SelfTransferAmount"].sum())
+    net_spending = external_spend - returned
     st.subheader("Statement overview")
-    metric_columns = st.columns(5)
+    metric_columns = st.columns(6)
     metric_columns[0].metric("Total credited", engine.total_income)
-    metric_columns[1].metric("Total withdrawn", engine.total_expenses)
-    metric_columns[2].metric("Net balance", engine.net_balance)
-    metric_columns[3].metric("Transactions", f"{len(records):,}")
-    metric_columns[4].metric(
-        "Average transaction",
-        format_currency(records["Amount"].abs().mean()) if not records.empty else format_currency(0),
+    metric_columns[1].metric("Total withdrawn (gross)", engine.total_expenses)
+    metric_columns[2].metric("Net spending", format_currency(net_spending))
+    metric_columns[3].metric("Returned payments", format_currency(returned))
+    metric_columns[4].metric("Own-account transfers", format_currency(self_transfers))
+    metric_columns[5].metric("Transactions", f"{len(records):,}")
+    st.caption(
+        f"Net spending = withdrawals excluding own-account transfers ({format_currency(external_spend)}) "
+        f"− identified returned payments ({format_currency(returned)}) = {format_currency(net_spending)}. "
+        "Own-account transfers are shown separately and excluded from spending."
     )
 
     monthly = pd.DataFrame(engine.monthly_chart_data)
     if not monthly.empty:
-        st.subheader("Monthly deposits, withdrawals, and savings")
+        st.subheader("Monthly deposits, withdrawals, and savings (gross)")
         chart = monthly.set_index("month")[["deposit", "withdrawal", "savings"]]
         st.bar_chart(chart)
-        st.dataframe(
-            pd.DataFrame(engine.monthly_summary_table, columns=["Month", "Deposit", "Withdrawal", "Savings"]),
-            hide_index=True,
-            width="stretch",
-        )
 
+    external_withdrawals = records[(records["Withdrawal"] > 0) & ~records["SelfTransfer"]]
+    category_totals = (
+        external_withdrawals.groupby("Category")["Withdrawal"]
+        .sum().sort_values(ascending=False).map(format_currency).reset_index()
+    )
+    category_totals.columns = ["Category", "External withdrawals"]
     left, right = st.columns(2)
     with left:
-        st.subheader("Largest withdrawals")
+        st.subheader("Largest withdrawals (excluding own transfers)")
+        largest = external_withdrawals.nlargest(10, "Withdrawal").copy()
+        largest["Withdrawal"] = largest["Withdrawal"].map(format_currency)
         st.dataframe(
-            pd.DataFrame(
-                engine.top_expenses_table,
-                columns=["Date", "Description", "Category", "Mode", "Band", "Amount"],
-            ),
+            largest[["Date", "Description", "Category", "PaymentMode", "Withdrawal"]],
             hide_index=True,
             width="stretch",
         )
     with right:
-        st.subheader("Withdrawals by category")
+        st.subheader("Withdrawals by category (excluding own transfers)")
         st.dataframe(
-            pd.DataFrame(engine.category_summary_table, columns=["Category", "Total Withdrawals"]),
+            category_totals,
             hide_index=True,
             width="stretch",
         )
@@ -442,9 +476,9 @@ def render_overview(engine):
         left, right = st.columns(2)
         with left:
             st.subheader("Deposit sources")
-            deposits = records[records["Deposit"] > 0]
+            deposits = records[(records["Deposit"] > 0) & ~records["SelfTransfer"]]
             if deposits.empty:
-                st.info("No deposits were found.")
+                st.info("No external deposits were found.")
             else:
                 sources = (
                     deposits.groupby("Merchant", dropna=False)
@@ -456,7 +490,7 @@ def render_overview(engine):
         with right:
             st.subheader("Payment methods")
             methods = (
-                records[records["Withdrawal"] > 0]
+                external_withdrawals
                 .groupby("PaymentMode", dropna=False)["Withdrawal"]
                 .sum()
                 .sort_values(ascending=False)
@@ -498,6 +532,70 @@ def render_overview(engine):
         )
 
 
+def annotate_transfer_types(records):
+    annotated = records.copy()
+    for column in ("Description", "Merchant", "PaymentAccountDisplay", "PaymentMode", "Category"):
+        if column not in annotated:
+            annotated[column] = ""
+        annotated[column] = annotated[column].fillna("").astype(str)
+
+    narration = (
+        annotated["Description"] + " " + annotated["Merchant"] + " "
+        + annotated["PaymentAccountDisplay"]
+    ).str.casefold()
+    annotated["SelfTransfer"] = narration.str.contains(
+        r"\bsharath\b|\bself(?:\s|-)?transfer\b|\bown\s+account\b|\bbetween\s+(?:my|own)\s+accounts?\b",
+        regex=True,
+        na=False,
+    )
+    annotated["ReturnedPayment"] = (
+        (annotated["Deposit"] > 0)
+        & ~annotated["SelfTransfer"]
+        & narration.str.contains(r"\b(?:refund|refunded|return(?:ed)?|reversal|reversed|chargeback|re-credited)\b", regex=True, na=False)
+    )
+    transfer_signals = narration.str.contains(
+        r"\b(?:transfer|transferred|sent|imps|neft|rtgs|p2p|p2a|beneficiary)\b",
+        regex=True,
+        na=False,
+    )
+    recipient_signal = narration.str.contains(r"\bto\s+[a-z][a-z0-9._-]*\b", regex=True, na=False)
+    annotated["SentToOthers"] = (
+        (annotated["Withdrawal"] > 0)
+        & ~annotated["SelfTransfer"]
+        & annotated["PaymentMode"].str.contains(r"UPI|Transfer", case=False, regex=True)
+        & (transfer_signals | (recipient_signal & annotated["Category"].eq("Other")))
+    )
+    merchant_key = (
+        annotated["Merchant"]
+        .str.casefold()
+        .str.replace(r"[^a-z0-9]+", " ", regex=True)
+        .str.strip()
+    )
+    for index, row in annotated[annotated["Deposit"] > 0].iterrows():
+        if row["SelfTransfer"] or annotated.at[index, "ReturnedPayment"]:
+            continue
+        prior_sent = annotated[
+            annotated["SentToOthers"]
+            & (annotated["Date"] < row["Date"])
+            & ((annotated["Withdrawal"] - row["Deposit"]).abs() < 0.01)
+            & merchant_key.eq(merchant_key.at[index])
+            & merchant_key.ne("")
+            & merchant_key.ne("unknown")
+        ]
+        if not prior_sent.empty:
+            annotated.at[index, "ReturnedPayment"] = True
+    annotated["TransactionType"] = "Payment"
+    annotated.loc[annotated["Deposit"] > 0, "TransactionType"] = "Deposit"
+    annotated.loc[annotated["SentToOthers"], "TransactionType"] = "Sent to someone"
+    annotated.loc[annotated["ReturnedPayment"], "TransactionType"] = "Money returned"
+    annotated.loc[annotated["SelfTransfer"], "TransactionType"] = "Own-account transfer"
+    annotated["ReturnedAmount"] = annotated["Deposit"].where(annotated["ReturnedPayment"], 0.0)
+    annotated["SelfTransferAmount"] = annotated[["Deposit", "Withdrawal"]].max(axis=1).where(
+        annotated["SelfTransfer"], 0.0
+    )
+    return annotated
+
+
 def render_transactions(engine):
     if not engine.raw_transactions:
         return
@@ -507,6 +605,7 @@ def render_transactions(engine):
     for column in ("Withdrawal", "Deposit", "Amount"):
         records[column] = pd.to_numeric(records[column], errors="coerce").fillna(0.0)
     records = records.dropna(subset=["Date"])
+    records = annotate_transfer_types(records)
     min_date = records["Date"].min().date()
     max_date = records["Date"].max().date()
 
@@ -517,7 +616,10 @@ def render_transactions(engine):
         placeholder="Try: Swiggy, UPI, salary, Food",
         help="Search description, merchant/payee, category, and payment method. Separate words to require all of them.",
     )
-    transaction_type = type_column.selectbox("Type", ["All", "Deposits", "Withdrawals"])
+    transaction_type = type_column.selectbox(
+        "Type",
+        ["All", "Deposits", "Withdrawals", "Sent to someone", "Money returned", "Own-account transfers"],
+    )
     selected_dates = st.date_input(
         "Date range",
         value=(min_date, max_date),
@@ -530,16 +632,41 @@ def render_transactions(engine):
     else:
         start_date = end_date = selected_dates
 
+    amount_min = float(records[["Deposit", "Withdrawal"]].max(axis=1).min())
+    amount_max = float(records[["Deposit", "Withdrawal"]].max(axis=1).max())
+    with st.expander("Filter by amount (optional)"):
+        if amount_min < amount_max:
+            amount_range = st.slider(
+                "Transaction amount",
+                min_value=amount_min,
+                max_value=amount_max,
+                value=(amount_min, amount_max),
+                step=max(1.0, round((amount_max - amount_min) / 100, 2)),
+                format="₹%.2f",
+            )
+        else:
+            amount_range = (amount_min, amount_max)
+            st.caption(f"All loaded transactions are {format_currency(amount_min)}.")
+
     filtered = records[records["Date"].dt.date.between(start_date, end_date)].copy()
     if transaction_type == "Deposits":
         filtered = filtered[filtered["Deposit"] > 0]
     elif transaction_type == "Withdrawals":
         filtered = filtered[filtered["Withdrawal"] > 0]
+    elif transaction_type == "Sent to someone":
+        filtered = filtered[filtered["SentToOthers"]]
+    elif transaction_type == "Money returned":
+        filtered = filtered[filtered["ReturnedPayment"]]
+    elif transaction_type == "Own-account transfers":
+        filtered = filtered[filtered["SelfTransfer"]]
+
+    row_amount = filtered[["Deposit", "Withdrawal"]].max(axis=1)
+    filtered = filtered[row_amount.between(amount_range[0], amount_range[1])]
 
     search_terms = re.findall(r"[a-z0-9]+", keyword.casefold())
     if search_terms:
         searchable = (
-            filtered[["Description", "Merchant", "PaymentAccountDisplay", "Category", "PaymentMode"]]
+            filtered[["Description", "Merchant", "PaymentAccountDisplay", "Category", "PaymentMode", "TransactionType"]]
             .fillna("")
             .astype(str)
             .agg(" ".join, axis=1)
@@ -552,17 +679,28 @@ def render_transactions(engine):
     filtered = filtered.sort_values("Date", ascending=False)
     deposits = float(filtered["Deposit"].sum())
     withdrawals = float(filtered["Withdrawal"].sum())
-    net = deposits - withdrawals
-    summary_columns = st.columns(4)
+    returned = float(filtered["ReturnedAmount"].sum())
+    self_transfers = float(filtered["SelfTransferAmount"].sum())
+    spend_before_returns = float(filtered.loc[~filtered["SelfTransfer"], "Withdrawal"].sum())
+    net_spending = spend_before_returns - returned
+    sent_to_others = float(filtered.loc[filtered["SentToOthers"], "Withdrawal"].sum())
+    summary_columns = st.columns(7)
     summary_columns[0].metric("Matching transactions", f"{len(filtered):,}")
     summary_columns[1].metric("Deposits", format_currency(deposits))
-    summary_columns[2].metric("Withdrawals", format_currency(withdrawals))
-    summary_columns[3].metric("Net", format_currency(net))
+    summary_columns[2].metric("Withdrawals (gross)", format_currency(withdrawals))
+    summary_columns[3].metric("Net spending", format_currency(net_spending))
+    summary_columns[4].metric("Sent to others", format_currency(sent_to_others))
+    summary_columns[5].metric("Returned", format_currency(returned))
+    summary_columns[6].metric("Own transfers", format_currency(self_transfers))
     st.caption(
-        f"Calculation for {start_date:%d %b %Y}–{end_date:%d %b %Y}: "
+        f"Filters: {start_date:%d %b %Y}–{end_date:%d %b %Y}; type = {transaction_type}; "
+        f"keywords = {keyword.strip() or 'none'}; amount = {format_currency(amount_range[0])}–{format_currency(amount_range[1])}. "
         f"deposits = sum of Deposit ({format_currency(deposits)}); "
         f"withdrawals = sum of Withdrawal ({format_currency(withdrawals)}); "
-        f"net = deposits − withdrawals = {format_currency(net)}. "
+        f"net spending = withdrawals excluding own-account transfers "
+        f"({format_currency(spend_before_returns)}) − identified returns "
+        f"({format_currency(returned)}) = {format_currency(net_spending)}. "
+        f"Own-account transfers ({format_currency(self_transfers)}) are reported separately, not counted as spending. "
         f"All totals use the {len(filtered):,} matching transaction(s) shown below."
     )
 
@@ -575,11 +713,20 @@ def render_transactions(engine):
             "PaymentAccountDisplay": "Account/Payee",
             "PaymentMode": "Mode",
             "SpendBand": "Spend band",
+            "TransactionType": "Transaction type",
+            "SelfTransfer": "Own-account transfer",
+            "ReturnedPayment": "Returned payment",
+            "SentToOthers": "Sent to someone",
+            "ReturnedAmount": "Returned amount",
+            "SelfTransferAmount": "Own-account transfer amount",
         }
     )
     st.dataframe(
         display[
-            ["Date", "Description", "Account/Payee", "Category", "Mode", "Spend band", "Withdrawal", "Deposit", "Amount", "Anomaly"]
+            [
+                "Date", "Description", "Account/Payee", "Transaction type", "Category",
+                "Mode", "Withdrawal", "Deposit", "Amount", "Anomaly",
+            ]
         ],
         hide_index=True,
         width="stretch",
