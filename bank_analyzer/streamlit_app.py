@@ -102,6 +102,36 @@ def format_currency(value):
     return f"{sign}{CURRENCY_SYMBOL}{abs(amount):,.2f}"
 
 
+def apply_transaction_exclusions(df, exclusion_keywords):
+    if isinstance(exclusion_keywords, str):
+        keywords = re.split(r"[,\n]", exclusion_keywords)
+    else:
+        keywords = []
+        for keyword in exclusion_keywords or []:
+            keywords.extend(re.split(r"[,\n]", str(keyword)))
+    keywords = list(dict.fromkeys(keyword.strip() for keyword in keywords if keyword.strip()))
+
+    if df.empty or not keywords:
+        return df.copy(), df.iloc[0:0].copy()
+
+    description_columns = [
+        column for column in df.columns
+        if column.casefold() in {"description", "narration"}
+    ]
+    if not description_columns:
+        raise ValueError("Transactions must include a Description or Narration column.")
+
+    descriptions = (
+        df[description_columns]
+        .fillna("")
+        .astype(str)
+        .agg(" ".join, axis=1)
+    )
+    pattern = "|".join(re.escape(keyword) for keyword in keywords)
+    excluded_mask = descriptions.str.contains(pattern, case=False, regex=True, na=False)
+    return df.loc[~excluded_mask].copy(), df.loc[excluded_mask].copy()
+
+
 def statement_records(engine):
     frame = engine._chat_dataframe()
     if frame.empty:
@@ -1247,7 +1277,18 @@ def render_chat(engine):
             ["assistant", answer_statement_question(engine, question.strip())],
         ])
         engine.chat_messages = messages[-18:]
+        st.session_state.chat_messages = engine.chat_messages
         st.rerun()
+
+
+def build_filtered_engine(engine, filtered_records):
+    analysis_engine = copy.deepcopy(engine)
+    source = filtered_records[["Date", "Description", "Withdrawal", "Deposit"]].copy()
+    source = source.rename(
+        columns={"Description": "Narration", "Withdrawal": "Debit", "Deposit": "Credit"}
+    )
+    analysis_engine.process_transactions(source, clean_statement_rows=False)
+    return analysis_engine
 
 
 def main():
@@ -1279,6 +1320,8 @@ def main():
                 st.session_state.uploaded_signature = signature
                 st.session_state.uploaded_filename = uploaded_file.name
                 engine.chat_messages = [["assistant", "Statement loaded. Ask a question about its transactions."]]
+                st.session_state.all_raw_transactions = copy.deepcopy(engine.raw_transactions)
+                st.session_state.chat_messages = copy.deepcopy(engine.chat_messages)
                 st.success(f"Statement ready · {uploaded_file.name} · {len(engine.raw_transactions):,} transactions")
             except (ValueError, pd.errors.ParserError, ImportError) as error:
                 st.error(str(error))
@@ -1286,25 +1329,81 @@ def main():
                 print(f"Statement processing failed for {uploaded_file.name}: {error}")
                 st.error("We couldn't read this statement. Check its date and deposit/withdrawal columns, then try again.")
 
-    if not engine.raw_transactions:
+    all_records = st.session_state.get("all_raw_transactions", engine.raw_transactions)
+    if not all_records:
         st.info("Your overview, transaction search, and statement Q&A will appear here after upload.")
+        return
+
+    with st.sidebar:
+        st.subheader("Exclude Transactions")
+        exclusion_input = st.text_area(
+            "Enter keywords",
+            placeholder="AMAZON\nCREDIT CARD PAYMENT\nSELF TRANSFER",
+            help="Enter one keyword per line or separate keywords with commas. Matching is case-insensitive and checks transaction descriptions.",
+            key="transaction_exclusion_keywords",
+            height=120,
+        )
+
+    try:
+        filtered_records, excluded_records = apply_transaction_exclusions(
+            pd.DataFrame(all_records), exclusion_input
+        )
+    except ValueError as error:
+        st.error(str(error))
+        return
+
+    excluded_amount = 0.0
+    if not excluded_records.empty:
+        movements = excluded_records[["Deposit", "Withdrawal"]].apply(
+            pd.to_numeric, errors="coerce"
+        ).fillna(0.0)
+        excluded_amount = float(movements.max(axis=1).sum())
+
+    with st.sidebar:
+        st.metric("Excluded Transactions", f"{len(excluded_records):,}")
+        st.metric("Excluded Amount", format_currency(excluded_amount))
+        excluded_share = len(excluded_records) / len(all_records)
+        if excluded_share > 0.25:
+            st.warning(
+                f"Warning: {excluded_share:.0%} of transactions are currently excluded from analysis."
+            )
+
+    if not excluded_records.empty:
+        with st.expander("View Excluded Transactions"):
+            audit = excluded_records[["Date", "Description", "Amount", "Category"]].copy()
+            audit["Date"] = pd.to_datetime(audit["Date"], errors="coerce").dt.strftime("%d %b %Y")
+            audit["Amount"] = audit["Amount"].map(format_currency)
+            st.dataframe(audit, hide_index=True, width="stretch")
+            st.download_button(
+                "Download Excluded Transactions CSV",
+                data=excluded_records.to_csv(index=False).encode("utf-8"),
+                file_name="excluded_transactions.csv",
+                mime="text/csv",
+            )
+
+    if filtered_records.empty:
+        st.info("All transactions are currently excluded. Change or clear the exclusion keywords to view analysis.")
         return
 
     loaded_name = st.session_state.get("uploaded_filename")
     if loaded_name:
-        st.caption(f"Currently analyzing **{loaded_name}** · {len(engine.raw_transactions):,} transactions")
+        st.caption(f"Currently analyzing **{loaded_name}** · {len(filtered_records):,} of {len(all_records):,} transactions")
 
+    active_engine = engine if excluded_records.empty else build_filtered_engine(engine, filtered_records)
+    active_engine.chat_messages = copy.deepcopy(
+        st.session_state.get("chat_messages", engine.chat_messages)
+    )
     overview_tab, transactions_tab, chat_tab, intelligence_tab = st.tabs(
         ["Overview", "Transactions", "Chat", "Spending Intelligence"]
     )
     with overview_tab:
-        render_overview(engine)
+        render_overview(active_engine)
     with transactions_tab:
-        render_transactions(engine)
+        render_transactions(active_engine)
     with chat_tab:
-        render_chat(engine)
+        render_chat(active_engine)
     with intelligence_tab:
-        render_spending_intelligence(engine)
+        render_spending_intelligence(active_engine)
 
 
 if __name__ == "__main__":

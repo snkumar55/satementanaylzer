@@ -1646,7 +1646,7 @@ class AnalyzerState(rx.State):
     # -------------------------
     # Main processing pipeline
     # -------------------------
-    def process_transactions(self, df: pd.DataFrame):
+    def process_transactions(self, df: pd.DataFrame, clean_statement_rows: bool = True):
         # normalize columns
         df.columns = df.columns.str.strip()
 
@@ -1691,27 +1691,31 @@ class AnalyzerState(rx.State):
         # amount
         df['Amount'] = df['Deposit'] - df['Withdrawal']
 
-        # remove statement summary rows robustly
-        summary_keywords = [
-            'statement summary', 'opening balance', 'closing bal', 'closing balance', 'debits', 'credits',
-            'dr count', 'cr count', 'statement summary :-', 'statement summary -', 'statement summary:'
-        ]
-        desc_lower = df['Description'].fillna('').str.lower()
-        mask_summary_desc = desc_lower.apply(lambda s: any(k in s for k in summary_keywords))
-        mask_short_desc = df['Description'].fillna('').str.strip().str.len() <= 3
-        med_dep = df['Deposit'].replace(0, np.nan).median(skipna=True)
-        med_wit = df['Withdrawal'].replace(0, np.nan).median(skipna=True)
-        med_dep = med_dep if not np.isnan(med_dep) else 1.0
-        med_wit = med_wit if not np.isnan(med_wit) else 1.0
-        factor = 100.0
-        mask_large_numbers = ((df['Deposit'].abs() > med_dep * factor) | (df['Withdrawal'].abs() > med_wit * factor))
-        mask_summary = mask_summary_desc | (mask_short_desc & mask_large_numbers)
-        df = df[~mask_summary].copy()
+        if clean_statement_rows:
+            # Remove statement summary rows robustly.
+            summary_keywords = [
+                'statement summary', 'opening balance', 'closing bal', 'closing balance', 'debits', 'credits',
+                'dr count', 'cr count', 'statement summary :-', 'statement summary -', 'statement summary:'
+            ]
+            desc_lower = df['Description'].fillna('').str.lower()
+            mask_summary_desc = desc_lower.apply(lambda s: any(k in s for k in summary_keywords))
+            mask_short_desc = df['Description'].fillna('').str.strip().str.len() <= 3
+            med_dep = df['Deposit'].replace(0, np.nan).median(skipna=True)
+            med_wit = df['Withdrawal'].replace(0, np.nan).median(skipna=True)
+            med_dep = med_dep if not np.isnan(med_dep) else 1.0
+            med_wit = med_wit if not np.isnan(med_wit) else 1.0
+            factor = 100.0
+            mask_large_numbers = ((df['Deposit'].abs() > med_dep * factor) | (df['Withdrawal'].abs() > med_wit * factor))
+            mask_summary = mask_summary_desc | (mask_short_desc & mask_large_numbers)
+            df = df[~mask_summary].copy()
 
-        # drop invalid dates, zero movement, and movements outside the analysis limit
-        df = df[df['Date'].notna() & (df['Amount'] != 0)].copy()
-        movement_amount = df[['Withdrawal', 'Deposit', 'Amount']].abs().max(axis=1)
-        df = df[movement_amount < ANALYSIS_AMOUNT_LIMIT].copy()
+            # Drop invalid dates, zero movement, and movements outside the analysis limit.
+            df = df[df['Date'].notna() & (df['Amount'] != 0)].copy()
+            movement_amount = df[['Withdrawal', 'Deposit', 'Amount']].abs().max(axis=1)
+            df = df[movement_amount < ANALYSIS_AMOUNT_LIMIT].copy()
+        else:
+            # These records have already passed the upload-time statement cleanup.
+            df = df[df['Date'].notna() & (df['Amount'] != 0)].copy()
         if df.empty:
             self._clear_analysis_results()
             return
