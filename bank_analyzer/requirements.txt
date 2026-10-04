@@ -1,0 +1,8 @@
+reflex==0.9.2.post1
+streamlit>=1.50,<2
+pandas
+numpy
+scikit-learn
+statsmodels
+xlrd>=2.0.1
+openpyxl

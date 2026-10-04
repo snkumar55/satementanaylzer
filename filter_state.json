@@ -1,0 +1,1 @@
+{"filter_start": "2026-09-01", "filter_end": "2026-10-01", "page_size": 25, "page_number": 1, "spend_focus": "Micro < \u20b95,000", "top_n_categories": 6, "forecast_model": "exp_smoothing", "exp_smoothing_trend": "add", "exp_smoothing_smoothing_level": 0.2}
