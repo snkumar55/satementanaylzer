@@ -54,10 +54,11 @@ The **Overview** emphasizes net spending, with income and gross withdrawals alon
 
 The existing launch command and upload formats are unchanged. No database migration or data conversion is required; transaction processing remains local and the existing AnalyzerState pipeline continues to provide categorization and forecast data.
 
-- `bank_analyzer/streamlit_app.py`: Streamlit startup, upload lifecycle, session state, and navigation.
+- `bank_analyzer/streamlit_app.py`: Streamlit startup, upload lifecycle, session state, exclusions, and navigation.
+- `bank_analyzer/services/streamlit_engine.py`: Streamlit-native transaction normalization, categorization, monthly summaries, recurring detection, forecasts, and chat query helpers; it does not import Reflex.
 - `bank_analyzer/services/`: analytics/KPI calculations, categorization normalization, chat, transfers, merchants, and forecast presentation.
 - `bank_analyzer/ui/`: Overview, Transactions, Chat, and Spending Intelligence renderers.
 - `bank_analyzer/utils/`: transaction exclusions, CSV export, and currency formatting.
-- `bank_analyzer/bank_analyzer/bank_analyzer.py`: existing statement-normalization pipeline and categorization rules; it delegates shared categorization and forecast calculations to `services/`.
+- `bank_analyzer/bank_analyzer/bank_analyzer.py`: legacy Reflex application pipeline, separate from the Streamlit runtime.
 
-To migrate an existing checkout, pull the updated files and install from the unchanged root `requirements.txt`; launch with the command in **Run locally**. Account-holder matching for own-account transfers is now optional and configured in the sidebar rather than tied to a name in code. Run service regression tests with `python -m unittest bank_analyzer.tests.test_services`.
+To migrate an existing checkout, pull the updated files and install from the unchanged root `requirements.txt`; launch with the command in **Run locally**. Account-holder matching for own-account transfers is now optional and configured in the sidebar rather than tied to a name in code. The Reflex dependency remains only for the legacy Reflex application; the Streamlit entrypoint and its imported services do not import Reflex. Run service regression tests with `python -m unittest bank_analyzer.tests.test_services`.

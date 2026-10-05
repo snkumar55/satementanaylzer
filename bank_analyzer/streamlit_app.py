@@ -1,27 +1,22 @@
 from __future__ import annotations
 
-import copy
 import hashlib
 import io
-import inspect
 import sys
-from dataclasses import MISSING
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from reflex_base.event import EventHandler
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from bank_analyzer.bank_analyzer.bank_analyzer import AnalyzerState
-
 from bank_analyzer.ui.chat import render_chat
 from bank_analyzer.ui.overview import render_overview
 from bank_analyzer.ui.spending_intelligence import render_spending_intelligence
 from bank_analyzer.ui.transactions import render_transactions
+from bank_analyzer.services.streamlit_engine import StreamlitAnalyzer
 from bank_analyzer.utils.filters import (
     EXCLUSION_WARNING_RATIO,
     apply_transaction_exclusions,
@@ -105,28 +100,8 @@ def render_brand_header():
     st.caption("A clear view of the activity in your bank statement.")
 
 def create_analyzer():
-    methods = {}
-    for name, member in AnalyzerState.__dict__.items():
-        if inspect.isfunction(member):
-            methods[name] = member
-        elif isinstance(member, EventHandler):
-            methods[name] = member.fn
-
-    engine_type = type("StreamlitAnalyzer", (), methods)
-    engine = engine_type()
-
-    for name, field in AnalyzerState.get_fields().items():
-        if not field.is_var:
-            continue
-        if field.default_factory is not None:
-            value = field.default_factory()
-        elif field.default is not MISSING:
-            value = copy.deepcopy(field.default)
-        else:
-            continue
-        setattr(engine, name, value)
-
-    return engine
+    """Create the Streamlit-native analysis engine without importing Reflex."""
+    return StreamlitAnalyzer()
 
 def load_statement(engine, uploaded_file):
     content = uploaded_file.getvalue()
@@ -146,7 +121,9 @@ def load_statement(engine, uploaded_file):
         raise ValueError("No valid transactions were found. Check the statement's dates and debit/credit columns.")
 
 def build_filtered_engine(engine, filtered_records):
-    analysis_engine = copy.deepcopy(engine)
+    analysis_engine = create_analyzer()
+    analysis_engine.account_holder_names = engine.account_holder_names
+    analysis_engine.statement_filename = engine.statement_filename
     source = filtered_records[["Date", "Description", "Withdrawal", "Deposit"]].copy()
     source = source.rename(
         columns={"Description": "Narration", "Withdrawal": "Debit", "Deposit": "Credit"}
@@ -185,9 +162,9 @@ def main():
                 st.session_state.uploaded_signature = signature
                 st.session_state.uploaded_filename = uploaded_file.name
                 engine.chat_messages = [["assistant", "Statement loaded. Ask a question about its transactions."]]
-                st.session_state.all_raw_transactions = copy.deepcopy(engine.raw_transactions)
-                st.session_state.chat_messages = copy.deepcopy(engine.chat_messages)
-            except (ValueError, pd.errors.ParserError, ImportError) as error:
+                st.session_state.all_raw_transactions = engine.raw_transactions.copy()
+                st.session_state.chat_messages = [message.copy() for message in engine.chat_messages]
+            except (ValueError, pd.errors.ParserError) as error:
                 st.error(str(error))
             except Exception as error:
                 print(f"Statement processing failed for {uploaded_file.name}: {error}")
@@ -282,8 +259,8 @@ def main():
     active_engine.statement_filename = st.session_state.get(
         "uploaded_filename", "Uploaded statement"
     )
-    active_engine.chat_messages = copy.deepcopy(
-        st.session_state.get("chat_messages", engine.chat_messages)
+    active_engine.chat_messages = st.session_state.get(
+        "chat_messages", engine.chat_messages
     )
     overview_tab, transactions_tab, chat_tab, intelligence_tab = st.tabs(
         ["Overview", "Transactions", "Chat", "Spending Intelligence"]

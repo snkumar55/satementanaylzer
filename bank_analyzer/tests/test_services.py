@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import sys
 import unittest
 
 import pandas as pd
@@ -7,6 +9,7 @@ import pandas as pd
 from bank_analyzer.services.analytics_service import dashboard_summary, transaction_totals
 from bank_analyzer.services.categorization_service import categorize_description
 from bank_analyzer.services.forecast_service import compute_forecast
+from bank_analyzer.services.streamlit_engine import StreamlitAnalyzer
 from bank_analyzer.services.transfer_service import annotate_transfer_types
 from bank_analyzer.utils.exports import csv_download_bytes
 from bank_analyzer.utils.filters import apply_transaction_exclusions
@@ -86,6 +89,32 @@ class TransactionAnalyticsTests(unittest.TestCase):
         forecast = compute_forecast(monthly, "linear", "add", 0.2)
         self.assertEqual(forecast[0][0], "Next Month (forecast)")
         self.assertEqual(forecast[0][1:], ["₹300.00", "₹100.00", "₹200.00"])
+
+    def test_streamlit_imports_without_reflex_registration(self):
+        importlib.import_module("bank_analyzer.streamlit_app")
+        self.assertFalse(
+            any(
+                name == "reflex" or name.startswith(("reflex.", "reflex_base"))
+                for name in sys.modules
+            )
+        )
+
+    def test_streamlit_engine_processes_statement_without_reflex(self):
+        engine = StreamlitAnalyzer()
+        engine.process_transactions(
+            pd.DataFrame(
+                {
+                    "Date": ["2026-01-02", "2026-02-02"],
+                    "Narration": ["UPI CAFE PAYMENT", "SALARY CREDIT"],
+                    "Debit": ["25", "0"],
+                    "Credit": ["0", "100"],
+                }
+            )
+        )
+        self.assertEqual(len(engine.raw_transactions), 2)
+        self.assertEqual(engine.raw_transactions[0]["Category"], "Food")
+        self.assertEqual(engine.total_income, "₹100.00")
+        self.assertEqual(len(engine.monthly_chart_data), 2)
 
 if __name__ == "__main__":
     unittest.main()
