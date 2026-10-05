@@ -16,10 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-try:
-    from bank_analyzer.bank_analyzer import AnalyzerState
-except ImportError:
-    from bank_analyzer.bank_analyzer.bank_analyzer import AnalyzerState
+from bank_analyzer.bank_analyzer.bank_analyzer import AnalyzerState
 
 from bank_analyzer.ui.chat import render_chat
 from bank_analyzer.ui.overview import render_overview

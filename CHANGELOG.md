@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Split Streamlit renderers, analysis helpers, filters, exports, and formatting into `ui/`, `services/`, and `utils/` modules.
-- Moved keyword-based categorization and forecast calculations into reusable services while keeping the existing analyzer pipeline and controls intact.
+- Added reusable categorization and forecast services while keeping the existing analyzer pipeline and controls intact; the Reflex state loads them lazily to avoid Streamlit import-time registration errors.
 - Centralized overview and transaction KPI calculations and merchant summaries.
 - Redesigned the Overview around statement metadata, cash-flow KPIs, insights, Plotly trends, category/merchant analysis, recurring payments, unusual activity, and forecasts.
 - Added Plotly visualizations to the Overview while retaining existing Spending Intelligence charts and transaction/chat workflows.

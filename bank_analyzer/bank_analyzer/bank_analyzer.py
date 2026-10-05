@@ -10,9 +10,6 @@ import warnings
 from sklearn.ensemble import IsolationForest
 from typing import Optional
 
-from ..services.categorization_service import categorize_description
-from ..services.forecast_service import compute_forecast
-
 # -------------------------
 # Config / constants
 # -------------------------
@@ -759,6 +756,8 @@ class AnalyzerState(rx.State):
         return parsed
 
     def _assign_category(self, description: str) -> str:
+        from ..services.categorization_service import categorize_description
+
         return categorize_description(description, self.CATEGORY_RULES)
 
     def _format_currency(self, value: float) -> str:
@@ -1917,6 +1916,8 @@ class AnalyzerState(rx.State):
     # Forecast helpers
     # -------------------------
     def _compute_forecast(self, monthly_df: pd.DataFrame):
+        from ..services.forecast_service import compute_forecast
+
         self.forecast_table = compute_forecast(
             monthly_df,
             self.forecast_model,
