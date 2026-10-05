@@ -8,9 +8,10 @@ import os
 import re
 import warnings
 from sklearn.ensemble import IsolationForest
-from sklearn.linear_model import LinearRegression
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from typing import Optional
+
+from ..services.categorization_service import categorize_description
+from ..services.forecast_service import compute_forecast
 
 # -------------------------
 # Config / constants
@@ -758,14 +759,7 @@ class AnalyzerState(rx.State):
         return parsed
 
     def _assign_category(self, description: str) -> str:
-        if not isinstance(description, str):
-            return "Other"
-        desc = description.lower()
-        for cat, keywords in self.CATEGORY_RULES.items():
-            for kw in keywords:
-                if kw in desc:
-                    return cat
-        return "Other"
+        return categorize_description(description, self.CATEGORY_RULES)
 
     def _format_currency(self, value: float) -> str:
         return f"₹{float(value or 0.0):,.2f}"
@@ -1923,40 +1917,12 @@ class AnalyzerState(rx.State):
     # Forecast helpers
     # -------------------------
     def _compute_forecast(self, monthly_df: pd.DataFrame):
-        try:
-            if len(monthly_df) < 2:
-                self.forecast_table = [["Next Month (forecast)", "N/A", "N/A", "N/A"]]
-                return
-            monthly_numeric = monthly_df.reset_index(drop=True)
-            if self.forecast_model == "linear":
-                monthly_numeric['idx'] = np.arange(len(monthly_numeric))
-                X = monthly_numeric[['idx']].values
-                lr_dep = LinearRegression().fit(X, monthly_numeric['Deposit'].values)
-                lr_wit = LinearRegression().fit(X, monthly_numeric['Withdrawal'].values)
-                next_idx = np.array([[len(monthly_numeric)]])
-                pred_dep = max(0.0, lr_dep.predict(next_idx)[0])
-                pred_wit = max(0.0, lr_wit.predict(next_idx)[0])
-            else:
-                try:
-                    dep_series = monthly_numeric['Deposit'].astype(float).values
-                    trend = None if self.exp_smoothing_trend in ("None", "none", "") else self.exp_smoothing_trend
-                    model_dep = ExponentialSmoothing(dep_series, trend=trend, seasonal=None, initialization_method="estimated")
-                    fit_dep = model_dep.fit(smoothing_level=self.exp_smoothing_smoothing_level, optimized=True)
-                    pred_dep = max(0.0, float(fit_dep.forecast(1)[0]))
-                except Exception:
-                    pred_dep = float(monthly_numeric['Deposit'].iloc[-1])
-                try:
-                    wit_series = monthly_numeric['Withdrawal'].astype(float).values
-                    trend = None if self.exp_smoothing_trend in ("None", "none", "") else self.exp_smoothing_trend
-                    model_wit = ExponentialSmoothing(wit_series, trend=trend, seasonal=None, initialization_method="estimated")
-                    fit_wit = model_wit.fit(smoothing_level=self.exp_smoothing_smoothing_level, optimized=True)
-                    pred_wit = max(0.0, float(fit_wit.forecast(1)[0]))
-                except Exception:
-                    pred_wit = float(monthly_numeric['Withdrawal'].iloc[-1])
-            pred_sav = pred_dep - pred_wit
-            self.forecast_table = [["Next Month (forecast)", f"₹{pred_dep:,.2f}", f"₹{pred_wit:,.2f}", f"₹{pred_sav:,.2f}"]]
-        except Exception:
-            self.forecast_table = [["Next Month (forecast)", "N/A", "N/A", "N/A"]]
+        self.forecast_table = compute_forecast(
+            monthly_df,
+            self.forecast_model,
+            self.exp_smoothing_trend,
+            self.exp_smoothing_smoothing_level,
+        )
 
 # -------------------------
 # UI Components (single-column full-width layout)

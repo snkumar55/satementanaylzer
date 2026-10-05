@@ -44,8 +44,20 @@ Upload a CSV, XLSX, or XLS bank statement and wait for its summaries and charts 
 - `Which category had the highest spending?`
 - `Show repeated payments`
 
-The **Transactions** tab keeps filtering simple: search keywords across descriptions, payees, categories, and payment methods; choose a date range and transaction type; optionally expand the amount range filter. Transaction types include deposits, withdrawals, payments sent to others, identified returns, and own-account transfers. Separate search words must all match. The displayed deposit, gross withdrawal, net spending, returned amount, sent-to-others, and own-account transfer totals are calculated only from matching rows, and the spending formula is shown above the results. Identified returns reduce net spending; transfers mentioning the account holder (`Sharath`) are listed separately and excluded from spending. Download the filtered rows as CSV.
+The **Transactions** tab keeps filtering simple: search keywords across descriptions, payees, categories, and payment methods; choose a date range and transaction type; optionally expand the amount range filter. Transaction types include deposits, withdrawals, payments sent to others, identified returns, and own-account transfers. Separate search words must all match. The displayed deposit, gross withdrawal, net spending, returned amount, sent-to-others, and own-account transfer totals are calculated only from matching rows, and the spending formula is shown above the results. Identified returns reduce net spending; identified own-account transfers are listed separately and excluded from spending. Download the filtered rows as CSV.
 
 Use **Exclude Transactions** in the sidebar to remove one or more narration/description keywords from every analysis, including dashboard totals, charts, forecasts, chat, and Spending Intelligence. Keywords are case-insensitive, support partial matches, and can be entered on separate lines or comma-separated. The sidebar shows excluded counts and amounts; the excluded rows can be reviewed and downloaded as CSV.
 
 The **Overview** emphasizes net spending, with income and gross withdrawals alongside it. Reconciliation details are available under **How totals are calculated**. It also includes monthly cash flow, deposit sources, payment methods, recurring payments, category breakdowns, transactions to review, and a trend-based estimate. **Spending Intelligence** summarizes category and merchant spending, concentration, monthly trends, largest purchases, spending behaviour, category details, and a statement-based score. Return and own-account transfer labels are inferred from statement descriptions. Chat questions can ask for totals, highest/lowest transactions, averages, counts, merchant and category breakdowns, payment methods, recurring payments, monthly summaries, and date/year ranges. Chat responses are calculated from the statement loaded for that session.
+
+## Architecture and migration
+
+The existing launch command and upload formats are unchanged. No database migration or data conversion is required; transaction processing remains local and the existing AnalyzerState pipeline continues to provide categorization and forecast data.
+
+- `bank_analyzer/streamlit_app.py`: Streamlit startup, upload lifecycle, session state, and navigation.
+- `bank_analyzer/services/`: analytics/KPI calculations, categorization normalization, chat, transfers, merchants, and forecast presentation.
+- `bank_analyzer/ui/`: Overview, Transactions, Chat, and Spending Intelligence renderers.
+- `bank_analyzer/utils/`: transaction exclusions, CSV export, and currency formatting.
+- `bank_analyzer/bank_analyzer/bank_analyzer.py`: existing statement-normalization pipeline and categorization rules; it delegates shared categorization and forecast calculations to `services/`.
+
+To migrate an existing checkout, pull the updated files and install from the unchanged root `requirements.txt`; launch with the command in **Run locally**. Account-holder matching for own-account transfers is now optional and configured in the sidebar rather than tied to a name in code. Run service regression tests with `python -m unittest bank_analyzer.tests.test_services`.
